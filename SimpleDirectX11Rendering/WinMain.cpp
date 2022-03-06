@@ -2,6 +2,9 @@
 #define UNICODE
 #endif
 
+#include <chrono>
+#include <thread>
+
 #include <windows.h>
 #include <windowsx.h>
 #include <iostream>
@@ -22,6 +25,7 @@ HINSTANCE m_hInstance;
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void InitD3D(HWND hwnd);
+void RenderFrame(FLOAT color[4]);
 void CleanD3D(void);
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
@@ -66,20 +70,52 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     ShowWindow(hwnd, nCmdShow);
 
+    //-------DEBUG CONSOLE--------//
+    /*FILE* fDummy;
+    AllocConsole();
+    freopen_s(&fDummy, "CONOUT$", "w", stdout);*/
+    //----------------------------//
+
     bool bGotMsg;
     MSG  msg;
     msg.message = WM_NULL;
 
     InitD3D(hwnd);
+    
+    FLOAT color[] = { 0.0f, 0.2f, 0.4f, 1.0f };
+    bool bFadeDir = TRUE;
 
-    while (WM_QUIT != msg.message) {
+    while (TRUE) {
         bGotMsg = (PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE) != 0);
 
         if (bGotMsg) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
+            
+            if (WM_QUIT == msg.message) {
+                break;
+            }
+
+            //std::cout << color[2] << std::endl;
+           
+            
         }
         else {
+            std::chrono::milliseconds timespan(10);
+            std::this_thread::sleep_for(timespan);
+
+            if (bFadeDir) {
+                color[2] -= 0.1f;
+            }
+            else {
+                color[2] += 0.1f;
+            }
+
+            if (color[2] >= 1.0f || color[2] <= 0.0f) {
+                bFadeDir = !bFadeDir;
+            }
+
+            RenderFrame(color);
             //renderer->Update();
 
             //renderer->Render();
@@ -120,6 +156,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+ID3D11RenderTargetView* m_backbuffer;
+
 void InitD3D(HWND hwnd) {
     DXGI_SWAP_CHAIN_DESC scd;
 
@@ -145,10 +183,34 @@ void InitD3D(HWND hwnd) {
         NULL,
         &m_devcon);
 
+    ID3D11Texture2D* pBackBuffer;
+    m_swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+
+    m_dev->CreateRenderTargetView(pBackBuffer, NULL, &m_backbuffer);
+    pBackBuffer->Release();
+
+    m_devcon->OMSetRenderTargets(1, &m_backbuffer, NULL);
+
+    D3D11_VIEWPORT viewport;
+    ZeroMemory(&viewport, sizeof(D3D11_VIEWPORT));
+
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    viewport.Width = 640;
+    viewport.Height = 480;
+    
+    m_devcon->RSSetViewports(1, &viewport);
+}
+
+void RenderFrame(FLOAT color[4]) {
+    m_devcon->ClearRenderTargetView(m_backbuffer, color);
+
+    m_swapchain->Present(0, 0);
 }
 
 void CleanD3D() {
     m_swapchain->Release();
+    m_backbuffer->Release();
     m_dev->Release();
     m_devcon->Release();
 }
