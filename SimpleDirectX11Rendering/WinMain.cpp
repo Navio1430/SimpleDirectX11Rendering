@@ -4,29 +4,56 @@
 
 #include <chrono>
 #include <thread>
+#include <stdlib.h>
 
 #include <windows.h>
 #include <windowsx.h>
 #include <iostream>
 #include <d3d11.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <wrl/client.h>
+using Microsoft::WRL::ComPtr;
 
+#pragma comment(lib,"d3dcompiler.lib")
 #pragma comment (lib, "d3d11.lib")
 
 IDXGISwapChain* m_swapchain;
 ID3D11Device* m_dev;
 ID3D11DeviceContext* m_devcon;
+ID3D11RenderTargetView* m_backbuffer;
+ID3D11InputLayout* m_pLayout;
+ID3D11VertexShader* m_pVs;
+ID3D11PixelShader* m_pPs;
+ID3D11Buffer* m_pVBuffer;
 
-int mDefaultWidth = 640;
-int mDefaultHeight = 480;
+struct COLOR {
+    FLOAT r, g, b, a;
+};
+
+struct VERTEX {
+    FLOAT x, y, z;
+    COLOR color;
+};
+
+#define SCREEN_WIDTH 1920
+#define SCREEN_HEIGHT 1080
+
+int m_defaultWidth = 1920;
+int m_defaultHeight = 1080;
+bool FULLSCREEN = FALSE;
 
 const wchar_t CLASS_NAME[] = L"SAMPLECLASSNAME";
 
 HINSTANCE m_hInstance;
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+HRESULT CompileShader(_In_ LPCWSTR srcFile, _In_ LPCSTR entryPoint, _In_ LPCSTR profile, _Outptr_ ID3DBlob** blob);
 void InitD3D(HWND hwnd);
-void RenderFrame(FLOAT color[4]);
+void RenderFrame(void);
 void CleanD3D(void);
+void InitGraphics(void);
+void InitPipeline(void);
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
 
@@ -44,7 +71,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     RegisterClass(&wc);
 
-    RECT wr = { 0, 0, mDefaultWidth, mDefaultHeight };
+    RECT wr = { 0, 0, m_defaultWidth, m_defaultHeight };
     AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
 
     HWND hwnd = CreateWindowEx(
@@ -54,8 +81,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         WS_OVERLAPPEDWINDOW,//WS_POPUP            // Window style
 
         // Size and position
-        1920 / 2 - (mDefaultWidth / 2),
-        1080 / 2 - (mDefaultHeight / 2),
+        SCREEN_WIDTH / 2 - (m_defaultWidth / 2),
+        SCREEN_HEIGHT / 2 - (m_defaultHeight / 2),
         wr.right - wr.left,
         wr.bottom - wr.top,
         NULL,       // Parent window    
@@ -82,7 +109,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     InitD3D(hwnd);
     
-    FLOAT color[] = { 0.0f, 0.2f, 0.4f, 1.0f };
     bool bFadeDir = TRUE;
 
     while (TRUE) {
@@ -96,26 +122,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
                 break;
             }
 
-            //std::cout << color[2] << std::endl;
-           
-            
-        }
-        else {
-            std::chrono::milliseconds timespan(10);
-            std::this_thread::sleep_for(timespan);
-
-            if (bFadeDir) {
-                color[2] -= 0.1f;
-            }
-            else {
-                color[2] += 0.1f;
-            }
-
-            if (color[2] >= 1.0f || color[2] <= 0.0f) {
-                bFadeDir = !bFadeDir;
-            }
-
-            RenderFrame(color);
+        } else {
+            RenderFrame();
             //renderer->Update();
 
             //renderer->Render();
@@ -156,8 +164,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-ID3D11RenderTargetView* m_backbuffer;
-
 void InitD3D(HWND hwnd) {
     DXGI_SWAP_CHAIN_DESC scd;
 
@@ -165,10 +171,13 @@ void InitD3D(HWND hwnd) {
 
     scd.BufferCount = 1;
     scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    scd.BufferDesc.Width = SCREEN_WIDTH;
+    scd.BufferDesc.Height = SCREEN_HEIGHT;
     scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scd.OutputWindow = hwnd;
     scd.SampleDesc.Count = 4;
     scd.Windowed = TRUE;
+    scd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
 
     D3D11CreateDeviceAndSwapChain(NULL,
         D3D_DRIVER_TYPE_HARDWARE,
@@ -186,6 +195,11 @@ void InitD3D(HWND hwnd) {
     ID3D11Texture2D* pBackBuffer;
     m_swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
 
+    if (FULLSCREEN) {
+        m_swapchain->SetFullscreenState(TRUE, NULL);
+    }
+   
+
     m_dev->CreateRenderTargetView(pBackBuffer, NULL, &m_backbuffer);
     pBackBuffer->Release();
 
@@ -196,22 +210,92 @@ void InitD3D(HWND hwnd) {
 
     viewport.TopLeftX = 0;
     viewport.TopLeftY = 0;
-    viewport.Width = 640;
-    viewport.Height = 480;
+    viewport.Width = m_defaultWidth;
+    viewport.Height = m_defaultHeight;
     
     m_devcon->RSSetViewports(1, &viewport);
+
+    InitPipeline();
+    InitGraphics();
 }
 
-void RenderFrame(FLOAT color[4]) {
-    m_devcon->ClearRenderTargetView(m_backbuffer, color);
+void RenderFrame(void) {
+    FLOAT bgcolor[4] = { 0.0f, 0.2f, 0.4f, 1.0f };
+    m_devcon->ClearRenderTargetView(m_backbuffer, bgcolor);
+
+    UINT stride = sizeof(VERTEX);
+    UINT offset = 0;
+
+    m_devcon->IASetVertexBuffers(0, 1, &m_pVBuffer, &stride, &offset);
+    m_devcon->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    m_devcon->Draw(3, 0);
 
     m_swapchain->Present(0, 0);
 }
 
 void CleanD3D() {
+    m_swapchain->SetFullscreenState(FALSE, NULL);
+
+    m_pLayout->Release();
+    m_pVs->Release();
+    m_pPs->Release();
+    m_pVBuffer->Release();
     m_swapchain->Release();
     m_backbuffer->Release();
     m_dev->Release();
     m_devcon->Release();
 }
 
+void InitGraphics() {
+    VERTEX triangleVertices[] = {
+        {0.0f, 0.5f, 0.0f, {1.0f,0.0f,0.0f,1.0f}},
+        {0.45f, -0.5f, 0.0f, {0.0f,1.0f,0.0f,1.0f}},
+        {-0.45f, -0.5f, 0.0f, {0.0f,0.0f,1.0f,1.0f}}
+    };
+
+    D3D11_BUFFER_DESC bd;
+    ZeroMemory(&bd, sizeof(bd));
+
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.ByteWidth = sizeof(VERTEX) * 3;
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    m_dev->CreateBuffer(&bd, NULL, &m_pVBuffer);
+
+    D3D11_MAPPED_SUBRESOURCE ms;
+    m_devcon->Map(m_pVBuffer, NULL, D3D11_MAP_WRITE_DISCARD, NULL, &ms);
+    memcpy(ms.pData, triangleVertices, sizeof(triangleVertices));
+    m_devcon->Unmap(m_pVBuffer, NULL);
+
+}
+
+void InitPipeline() {
+    ComPtr<ID3D10Blob> VS, PS, Errors;
+
+    D3DCompileFromFile(L"D:\\Projekty\\C++\\SimpleDirectX11Rendering\\SimpleDirectX11Rendering\\x64\\Debug\\shaders.shader", nullptr, nullptr, "VShader", "vs_4_0", 0, 0, &VS, &Errors);
+    if (Errors) {
+        OutputDebugStringA(reinterpret_cast<const char*>(Errors->GetBufferPointer()));
+    }
+    D3DCompileFromFile(L"D:\\Projekty\\C++\\SimpleDirectX11Rendering\\SimpleDirectX11Rendering\\x64\\Debug\\shaders.shader", nullptr, nullptr, "PShader", "ps_4_0", 0, 0, &PS, &Errors);
+    if (Errors) {
+        OutputDebugStringA(reinterpret_cast<const char*>(Errors->GetBufferPointer()));
+    }
+
+    m_dev->CreateVertexShader(VS->GetBufferPointer(), VS->GetBufferSize(), nullptr, &m_pVs);
+    m_dev->CreatePixelShader(PS->GetBufferPointer(), PS->GetBufferSize(), nullptr, &m_pPs);
+
+    m_devcon->VSSetShader(m_pVs, 0, 0);
+    m_devcon->PSSetShader(m_pPs, 0, 0);
+
+    
+    D3D11_INPUT_ELEMENT_DESC ied[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0}
+    };
+
+    m_dev->CreateInputLayout(ied, 2, VS->GetBufferPointer(), VS->GetBufferSize(), &m_pLayout);
+    m_devcon->IASetInputLayout(m_pLayout);
+
+}
